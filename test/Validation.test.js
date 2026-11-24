@@ -212,6 +212,134 @@ describe('Validation', () => {
       }
     });
 
+    it('should not allow an IP address in the origin header when it does not match the host header', () => {
+      const options = {};
+
+      const tests = [
+        { host: 'localhost:8080', origin: 'http://192.168.1.1' },
+        { host: 'localhost:8080', origin: 'http://192.168.1.1/' },
+        { host: 'localhost:8080', origin: 'https://192.168.1.1:8080' },
+        { host: '127.0.0.1:8080', origin: 'http://192.168.1.1:8080' },
+        { host: '192.168.1.2:8080', origin: 'http://192.168.1.1:8080' },
+        {
+          host: 'localhost:8080',
+          origin: 'http://[ad42::1de2:54c2:c2fa:1234]:8080',
+        },
+        { host: '[::1]:8080', origin: 'http://[ad42::1de2:54c2:c2fa:1234]' },
+      ];
+
+      server = new Server(compiler, options);
+
+      tests.forEach((headers) => {
+        // the Host header itself is still valid
+        if (!server.checkHost(headers)) {
+          throw new Error("Validation didn't pass");
+        }
+
+        if (server.isSameOrigin(headers)) {
+          throw new Error("Validation didn't fail");
+        }
+
+        if (server.checkOrigin(headers)) {
+          throw new Error("Validation didn't fail");
+        }
+
+        if (server.checkHeaders(headers, 'origin')) {
+          throw new Error("Validation didn't fail");
+        }
+      });
+    });
+
+    it('should not allow an IP address in the origin header when there is no host header', () => {
+      const options = {};
+
+      const headers = {
+        origin: 'http://192.168.1.1',
+      };
+
+      server = new Server(compiler, options);
+
+      if (server.checkOrigin(headers)) {
+        throw new Error("Validation didn't fail");
+      }
+    });
+
+    it('should allow an IP address in the origin header when it matches the host header', () => {
+      const options = {};
+
+      const tests = [
+        { host: '127.0.0.1:8080', origin: 'http://127.0.0.1:8080' },
+        { host: '192.168.1.123', origin: 'http://192.168.1.123' },
+        { host: '192.168.1.123:8080', origin: 'https://192.168.1.123:8080' },
+        { host: '[::1]:8080', origin: 'http://[::1]:8080' },
+        {
+          host: '[ad42::1de2:54c2:c2fa:1234]:8080',
+          origin: 'http://[ad42::1de2:54c2:c2fa:1234]:8080',
+        },
+      ];
+
+      server = new Server(compiler, options);
+
+      tests.forEach((headers) => {
+        if (!server.isSameOrigin(headers)) {
+          throw new Error("Validation didn't pass");
+        }
+
+        if (!server.checkHost(headers) || !server.checkOrigin(headers)) {
+          throw new Error("Validation didn't pass");
+        }
+      });
+    });
+
+    it('should allow an IP address in the origin header if options.disableHostCheck is set', () => {
+      const options = {
+        disableHostCheck: true,
+      };
+
+      const headers = {
+        host: 'localhost:8080',
+        origin: 'http://192.168.1.1',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkHost(headers) || !server.checkOrigin(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+
+    it('should allow an IP address in the origin header if it is in allowedHosts', () => {
+      const options = {
+        allowedHosts: ['192.168.1.1'],
+      };
+
+      const headers = {
+        host: 'localhost:8080',
+        origin: 'http://192.168.1.1',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkHost(headers) || !server.checkOrigin(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+
+    it('should still allow a localhost origin header for an IP address host header', () => {
+      const options = {};
+
+      const headers = {
+        host: '127.0.0.1:8080',
+        origin: 'http://localhost:8080',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkHost(headers) || !server.checkOrigin(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+
     describe('allowedHosts', () => {
       it('should allow hosts in allowedHosts', () => {
         const tests = ['test.host', 'test2.host', 'test3.host'];

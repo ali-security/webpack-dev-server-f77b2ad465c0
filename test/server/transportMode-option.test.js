@@ -4,6 +4,7 @@
   class-methods-use-this
 */
 const request = require('supertest');
+const ws = require('ws');
 const sockjs = require('sockjs');
 const SockJS = require('sockjs-client/dist/sockjs');
 const SockJSServer = require('../../lib/servers/SockJSServer');
@@ -434,6 +435,107 @@ describe('transportMode', () => {
             expect(data).toMatchSnapshot();
             done();
           }, 5000);
+        });
+      });
+
+      describe('with an IP address in the origin header ("ws")', () => {
+        beforeAll((done) => {
+          server = testServer.start(
+            config,
+            {
+              port,
+              transportMode: 'ws',
+            },
+            done
+          );
+        });
+
+        it('should disconnect a client whose origin IP address does not match the host header', () => {
+          const data = [];
+          // emulates a malicious page served from an IP address
+          // eslint-disable-next-line new-cap
+          const client = new ws(`ws://localhost:${port}/sockjs-node`, {
+            origin: 'http://192.168.1.1',
+          });
+
+          return new Promise((resolve) => {
+            client.on('message', (message) => {
+              data.push(message);
+            });
+
+            client.on('close', () => {
+              data.push('close');
+              resolve();
+            });
+
+            client.on('error', () => {
+              resolve();
+            });
+
+            setTimeout(resolve, 5000);
+          }).then(() => {
+            client.terminate();
+
+            expect(data).toEqual([
+              JSON.stringify({
+                type: 'error',
+                data: 'Invalid Host/Origin header',
+              }),
+              'close',
+            ]);
+          });
+        });
+      });
+
+      describe('with a same-origin IP address in the origin header ("ws")', () => {
+        beforeAll((done) => {
+          server = testServer.start(
+            config,
+            {
+              port,
+              transportMode: 'ws',
+            },
+            done
+          );
+        });
+
+        it('should keep a client whose origin IP address matches the host header connected', () => {
+          const data = [];
+          // eslint-disable-next-line new-cap
+          const client = new ws(`ws://127.0.0.1:${port}/sockjs-node`, {
+            origin: `http://127.0.0.1:${port}`,
+          });
+
+          return new Promise((resolve) => {
+            client.on('message', (message) => {
+              data.push(message);
+            });
+
+            client.on('close', () => {
+              data.push('close');
+              resolve();
+            });
+
+            client.on('error', () => {
+              resolve();
+            });
+
+            setTimeout(resolve, 3000);
+          }).then(() => {
+            const isOpen = client.readyState === ws.OPEN;
+
+            client.terminate();
+
+            expect(isOpen).toBe(true);
+            expect(data.length).toBeGreaterThan(0);
+            expect(data).not.toContain('close');
+            expect(data).not.toContain(
+              JSON.stringify({
+                type: 'error',
+                data: 'Invalid Host/Origin header',
+              })
+            );
+          });
         });
       });
     });
