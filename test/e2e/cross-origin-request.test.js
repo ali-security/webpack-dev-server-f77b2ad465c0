@@ -125,3 +125,149 @@ describe('cross-origin requests', () => {
     });
   });
 });
+
+// @see https://github.com/webpack/webpack-dev-server/security/advisories/GHSA-79cf-xcqc-c78w
+describe('cross-origin resource policy header', () => {
+  const devServerPort = port1;
+
+  function startServer(devServerOptions) {
+    return new Promise((resolve, reject) => {
+      testServer.start(
+        config,
+        Object.assign({ port: devServerPort }, devServerOptions),
+        (err) => (err ? reject(err) : resolve())
+      );
+    });
+  }
+
+  function request(path, headers) {
+    return new Promise((resolve, reject) => {
+      const req = http.get(
+        {
+          host: 'localhost',
+          port: devServerPort,
+          path,
+          headers: headers || {},
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => {
+            body += chunk;
+          });
+          res.on('end', () => {
+            resolve({ status: res.statusCode, headers: res.headers, body });
+          });
+        }
+      );
+      req.on('error', reject);
+    });
+  }
+
+  afterEach((done) => {
+    testServer.close(done);
+  });
+
+  it('should set Cross-Origin-Resource-Policy: same-origin by default', () => {
+    return startServer({})
+      .then(() => request('/main.js'))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(res.headers['cross-origin-resource-policy']).toBe(
+          'same-origin'
+        );
+      });
+  });
+
+  // Over plain HTTP on a non-localhost origin (e.g. a LAN IP), browsers omit
+  // the Sec-Fetch-* headers, so the 403 check is bypassed and a <script> tag
+  // on a malicious site can load the bundle; CORP makes the browser block it.
+  it('should set Cross-Origin-Resource-Policy: same-origin for cross-site requests without fetch metadata headers', () => {
+    const headers = {
+      Host: `192.168.1.10:${devServerPort}`,
+      Referer: 'http://attacker.example.com/',
+    };
+
+    return startServer({})
+      .then(() =>
+        Promise.all([
+          request('/main.js', headers),
+          request('/webpack-dev-server.js', headers),
+          request('/__webpack_dev_server__/live.bundle.js', headers),
+        ])
+      )
+      .then((responses) => {
+        responses.forEach((res) => {
+          expect(res.status).toBe(200);
+          expect(res.headers['cross-origin-resource-policy']).toBe(
+            'same-origin'
+          );
+        });
+      });
+  });
+
+  it("should NOT set CORP header with the 'disableHostCheck' option", () => {
+    return startServer({ disableHostCheck: true })
+      .then(() => request('/main.js'))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+      });
+  });
+
+  it('should NOT set CORP header when user configures wildcard CORS', () => {
+    return startServer({
+      headers: { 'Access-Control-Allow-Origin': '*' },
+    })
+      .then(() => request('/main.js'))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+      });
+  });
+
+  it('should set CORP header when user configures a specific-origin Access-Control-Allow-Origin (no-cors embedding is not governed by CORS)', () => {
+    return startServer({
+      headers: { 'Access-Control-Allow-Origin': 'http://foo.example.com' },
+    })
+      .then(() => request('/main.js'))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(res.headers['cross-origin-resource-policy']).toBe(
+          'same-origin'
+        );
+      });
+  });
+
+  it('should set CORP header when user configures Access-Control-Allow-Origin as an array with a specific origin', () => {
+    return startServer({
+      headers: { 'Access-Control-Allow-Origin': ['http://foo.example.com'] },
+    })
+      .then(() => request('/main.js'))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(res.headers['cross-origin-resource-policy']).toBe(
+          'same-origin'
+        );
+      });
+  });
+
+  it('should NOT set CORP header when user configures wildcard Access-Control-Allow-Origin as an array', () => {
+    return startServer({
+      headers: { 'access-control-allow-origin': ['*'] },
+    })
+      .then(() => request('/main.js'))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+      });
+  });
+
+  it('should NOT set CORP header when host is in allowedHosts', () => {
+    return startServer({ allowedHosts: ['localhost'] })
+      .then(() => request('/main.js'))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+      });
+  });
+});
