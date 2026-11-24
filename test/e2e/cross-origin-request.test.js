@@ -271,3 +271,166 @@ describe('cross-origin resource policy header', () => {
       });
   });
 });
+
+// @see https://nvd.nist.gov/vuln/detail/CVE-2026-14620
+describe('cross-site request forgery on state-changing endpoints', () => {
+  const devServerPort = port1;
+  const endpoint = '/webpack-dev-server/invalidate';
+
+  let server;
+
+  function startServer(devServerOptions) {
+    return new Promise((resolve, reject) => {
+      server = testServer.start(
+        config,
+        Object.assign({ port: devServerPort }, devServerOptions),
+        (err) => (err ? reject(err) : resolve())
+      );
+    }).then(() => {
+      jest.spyOn(server, 'invalidate');
+    });
+  }
+
+  function request(path, headers) {
+    return new Promise((resolve, reject) => {
+      const req = http.get(
+        {
+          host: 'localhost',
+          port: devServerPort,
+          path,
+          headers: headers || {},
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => {
+            body += chunk;
+          });
+          res.on('end', () => {
+            resolve({ status: res.statusCode, body });
+          });
+        }
+      );
+      req.on('error', reject);
+    });
+  }
+
+  afterEach((done) => {
+    server = null;
+    testServer.close(done);
+  });
+
+  it(`should block cross-site requests to ${endpoint}`, () => {
+    return startServer({})
+      .then(() =>
+        request(endpoint, {
+          'sec-fetch-mode': 'cors',
+          'sec-fetch-site': 'cross-site',
+        })
+      )
+      .then((res) => {
+        expect(res.status).toBe(403);
+        expect(res.body).toBe('Cross-Origin request blocked');
+        expect(server.invalidate).not.toHaveBeenCalled();
+      });
+  });
+
+  it(`should block cross-site navigations to ${endpoint}`, () => {
+    return startServer({})
+      .then(() =>
+        request(endpoint, {
+          'sec-fetch-dest': 'document',
+          'sec-fetch-mode': 'navigate',
+          'sec-fetch-site': 'cross-site',
+        })
+      )
+      .then((res) => {
+        expect(res.status).toBe(403);
+        expect(server.invalidate).not.toHaveBeenCalled();
+      });
+  });
+
+  it(`should block same-site requests from another origin to ${endpoint}`, () => {
+    return startServer({})
+      .then(() =>
+        request(endpoint, {
+          'sec-fetch-mode': 'cors',
+          'sec-fetch-site': 'same-site',
+        })
+      )
+      .then((res) => {
+        expect(res.status).toBe(403);
+        expect(server.invalidate).not.toHaveBeenCalled();
+      });
+  });
+
+  it(`should allow same-origin requests to ${endpoint}`, () => {
+    return startServer({})
+      .then(() =>
+        request(endpoint, {
+          'sec-fetch-mode': 'cors',
+          'sec-fetch-site': 'same-origin',
+        })
+      )
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(server.invalidate).toHaveBeenCalledTimes(1);
+      });
+  });
+
+  it(`should allow user-initiated navigations to ${endpoint}`, () => {
+    return startServer({})
+      .then(() => request(endpoint, { 'sec-fetch-site': 'none' }))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(server.invalidate).toHaveBeenCalledTimes(1);
+      });
+  });
+
+  it('should block requests with a cross-origin Origin and no Sec-Fetch metadata', () => {
+    return startServer({})
+      .then(() => request(endpoint, { origin: 'http://evil.example' }))
+      .then((res) => {
+        expect(res.status).toBe(403);
+        expect(res.body).toBe('Cross-Origin request blocked');
+        expect(server.invalidate).not.toHaveBeenCalled();
+      });
+  });
+
+  it('should allow requests with a same-origin Origin and no Sec-Fetch metadata', () => {
+    return startServer({})
+      .then(() =>
+        request(endpoint, { origin: `http://localhost:${devServerPort}` })
+      )
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(server.invalidate).toHaveBeenCalledTimes(1);
+      });
+  });
+
+  it('should allow requests without Sec-Fetch metadata or Origin (e.g. curl)', () => {
+    return startServer({})
+      .then(() => request(endpoint))
+      .then((res) => {
+        expect(res.status).toBe(200);
+        expect(server.invalidate).toHaveBeenCalledTimes(1);
+      });
+  });
+
+  // A trusted host bypasses the global no-cors check, so the endpoint itself
+  // must still reject the cross-site request.
+  it(`should block cross-site no-cors requests to ${endpoint} with the 'allowedHosts' option`, () => {
+    return startServer({ allowedHosts: ['localhost'] })
+      .then(() =>
+        request(endpoint, {
+          'sec-fetch-dest': 'image',
+          'sec-fetch-mode': 'no-cors',
+          'sec-fetch-site': 'cross-site',
+        })
+      )
+      .then((res) => {
+        expect(res.status).toBe(403);
+        expect(res.body).toBe('Cross-Origin request blocked');
+        expect(server.invalidate).not.toHaveBeenCalled();
+      });
+  });
+});
