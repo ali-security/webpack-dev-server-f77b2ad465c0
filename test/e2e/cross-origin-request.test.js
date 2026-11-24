@@ -434,3 +434,246 @@ describe('cross-site request forgery on state-changing endpoints', () => {
       });
   });
 });
+
+// @see https://nvd.nist.gov/vuln/detail/CVE-2026-14631
+describe('malformed Host/Origin headers', () => {
+  const url = require('url');
+  const net = require('net');
+  const WebSocket = require('ws');
+
+  const devServerPort = port1;
+  const parse = url.parse;
+
+  let server;
+
+  // Recent Node.js versions throw from `url.parse()` on a malformed `Host` or
+  // `Origin` value (invalid IPv6 literal) while older ones parse it leniently,
+  // so make `url.parse()` throw on the malformed values sent below like the
+  // recent ones do.
+  function mockThrowingUrlParse() {
+    const malformed = ['//[::1', 'http://[::1/'];
+
+    jest.spyOn(url, 'parse').mockImplementation((value, ...args) => {
+      if (malformed.indexOf(value) !== -1) {
+        const error = new TypeError(`Invalid URL: ${value}`);
+
+        error.code = 'ERR_INVALID_URL';
+
+        throw error;
+      }
+
+      return parse.call(url, value, ...args);
+    });
+  }
+
+  function startServer(devServerOptions) {
+    return new Promise((resolve, reject) => {
+      server = testServer.start(
+        config,
+        Object.assign({ port: devServerPort }, devServerOptions),
+        (err) => (err ? reject(err) : resolve())
+      );
+    });
+  }
+
+  function request(path, headers) {
+    return new Promise((resolve, reject) => {
+      const req = http.get(
+        {
+          host: 'localhost',
+          port: devServerPort,
+          path,
+          headers: headers || {},
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => {
+            body += chunk;
+          });
+          res.on('end', () => {
+            resolve({ status: res.statusCode, body });
+          });
+        }
+      );
+      req.on('error', reject);
+    });
+  }
+
+  // Sends `GET /main.js` over a raw socket so the `Host` value reaches the
+  // server as-is, and resolves with the raw response.
+  function rawRequest(host) {
+    return new Promise((resolve) => {
+      let response = '';
+
+      const socket = net.connect(devServerPort, '127.0.0.1', () => {
+        socket.write(
+          [
+            'GET /main.js HTTP/1.1',
+            `Host: ${host}`,
+            'Connection: close',
+            '',
+            '',
+          ].join('\r\n')
+        );
+      });
+
+      socket.on('data', (chunk) => {
+        response += chunk;
+      });
+      socket.on('close', () => resolve(response));
+      socket.on('error', () => resolve(response));
+    });
+  }
+
+  // Opens a WebSocket to the dev server socket and resolves with the messages
+  // received until the connection is closed.
+  function connectSocket(transportMode, headers) {
+    const socketPath =
+      transportMode === 'ws'
+        ? '/sockjs-node'
+        : '/sockjs-node/000/abcd1234/websocket';
+
+    return new Promise((resolve) => {
+      const data = [];
+      const client = new WebSocket(
+        `ws://localhost:${devServerPort}${socketPath}`,
+        { headers }
+      );
+
+      let finished = false;
+      let timeout = null;
+
+      const finish = () => {
+        if (finished) {
+          return;
+        }
+
+        finished = true;
+        clearTimeout(timeout);
+        client.terminate();
+        resolve(data);
+      };
+
+      client.on('message', (message) => {
+        data.push(message);
+      });
+      client.on('close', () => {
+        data.push('close');
+        finish();
+      });
+      client.on('error', finish);
+
+      timeout = setTimeout(finish, 5000);
+    });
+  }
+
+  // The server must still be alive: a normal request still succeeds.
+  function expectServerAlive() {
+    return request('/main.js').then((res) => {
+      expect(res.status).toBe(200);
+    });
+  }
+
+  afterEach((done) => {
+    jest.restoreAllMocks();
+    server = null;
+    testServer.close(done);
+  });
+
+  ['sockjs', 'ws'].forEach((transportMode) => {
+    describe(`with the "${transportMode}" transport mode`, () => {
+      it('should reject a WebSocket connection with a malformed Origin header without crashing', () => {
+        return startServer({ transportMode })
+          .then(() => {
+            mockThrowingUrlParse();
+
+            return connectSocket(transportMode, {
+              host: `localhost:${devServerPort}`,
+              origin: 'http://[::1/',
+            });
+          })
+          .then((data) => {
+            expect(url.parse).toHaveBeenCalledWith('http://[::1/', false, true);
+            expect(data.join('\n')).toContain('Invalid Host/Origin header');
+            expect(data).toContain('close');
+          })
+          .then(() => expectServerAlive());
+      });
+
+      it('should reject a WebSocket connection with a malformed Host header without crashing', () => {
+        return startServer({ transportMode })
+          .then(() => {
+            mockThrowingUrlParse();
+
+            return connectSocket(transportMode, {
+              host: '[::1',
+              origin: `http://localhost:${devServerPort}`,
+            });
+          })
+          .then((data) => {
+            expect(url.parse).toHaveBeenCalledWith('//[::1', false, true);
+            expect(data.join('\n')).toContain('Invalid Host/Origin header');
+            expect(data).toContain('close');
+          })
+          .then(() => expectServerAlive());
+      });
+
+      it('should reject a WebSocket connection with an Origin header without a hostname without crashing', () => {
+        return startServer({ transportMode, allowedHosts: ['.example.com'] })
+          .then(() =>
+            connectSocket(transportMode, {
+              host: `localhost:${devServerPort}`,
+              origin: 'javascript://evil.example.com',
+            })
+          )
+          .then((data) => {
+            expect(data.join('\n')).toContain('Invalid Host/Origin header');
+            expect(data).toContain('close');
+          })
+          .then(() => expectServerAlive());
+      });
+    });
+  });
+
+  it('should reject a request with a malformed Host header without crashing', () => {
+    return startServer({})
+      .then(() => {
+        mockThrowingUrlParse();
+
+        return rawRequest('[::1');
+      })
+      .then((response) => {
+        expect(url.parse).toHaveBeenCalledWith('//[::1', false, true);
+        expect(response).toContain('Invalid Host header');
+      })
+      .then(() => expectServerAlive());
+  });
+
+  it('should reject a request with a Host header without a hostname without crashing', () => {
+    return startServer({ allowedHosts: ['.example.com'] })
+      .then(() => rawRequest('javascript://evil.example.com'))
+      .then((response) => {
+        expect(response).toContain('Invalid Host header');
+      })
+      .then(() => expectServerAlive());
+  });
+
+  it('should block requests to /webpack-dev-server/invalidate with a malformed Origin header', () => {
+    return startServer({})
+      .then(() => {
+        jest.spyOn(server, 'invalidate');
+        mockThrowingUrlParse();
+
+        return request('/webpack-dev-server/invalidate', {
+          origin: 'http://[::1/',
+        });
+      })
+      .then((res) => {
+        expect(url.parse).toHaveBeenCalledWith('http://[::1/', false, true);
+        expect(res.status).toBe(403);
+        expect(res.body).toBe('Cross-Origin request blocked');
+        expect(server.invalidate).not.toHaveBeenCalled();
+      })
+      .then(() => expectServerAlive());
+  });
+});
